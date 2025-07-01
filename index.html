@@ -6,8 +6,7 @@
     <title>Spreadsheet Alam</title>
     <!-- Tailwind CSS CDN for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Google Fonts - Inter for general text (though app specifies serif, this is a common fallback) -->
-    <!-- For serif font, you might want to link a specific serif font like Merriweather or Playfair Display -->
+    <!-- Google Fonts - Merriweather for serif font -->
     <link href="https://fonts.googleapis.com/css2?family=Merriweather:wght@400;700&display=swap" rel="stylesheet">
     <style>
         /* Apply Merriweather as the serif font */
@@ -23,18 +22,12 @@
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <!-- Babel Standalone for JSX transformation in browser (for development only) -->
-    <!-- In a production environment, you would use a build tool like Webpack/Vite to transpile JSX -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-    <!-- XLSX library (already included in your App.jsx, but better to ensure it's loaded before App) -->
+    <!-- XLSX library -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
     <script type="text/babel">
-        // This is where your App.jsx content would go.
-        // For this example, we'll assume App.jsx content is directly here.
-        // In a real project, you would import App from './App.jsx';
-
-        // Your App.jsx code starts here
         const App = () => {
             const [workbook, setWorkbook] = React.useState(null);
             const [sheetNames, setSheetNames] = React.useState([]);
@@ -43,21 +36,114 @@
             const [message, setMessage] = React.useState('');
             const fileInputRef = React.useRef(null);
 
+            // State for AI generation feature
             const [showAIPromptModal, setShowAIPromptModal] = React.useState(false);
             const [aiPrompt, setAiPrompt] = React.useState('');
             const [isGeneratingAI, setIsGeneratingAI] = React.useState(false);
 
+            // State for voice input feature
+            const [showVoiceInputModal, setShowVoiceInputModal] = React.useState(false);
+            const [voiceStatus, setVoiceStatus] = React.useState('Siap');
+            const [recognition, setRecognition] = React.useState(null);
+
+            // State to store inferred column types
+            const [columnTypes, setColumnTypes] = React.useState({}); // {colIndex: 'text' | 'number' | 'binary'}
+
+            // Effect to load data when workbook or active sheet changes
             React.useEffect(() => {
                 if (workbook && activeSheetName) {
                     if (typeof XLSX !== 'undefined' && XLSX.utils) {
                         const ws = workbook.Sheets[activeSheetName];
                         const jsonSheetData = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true });
                         setSheetData(jsonSheetData);
+                        inferColumnTypes(jsonSheetData); // Infer types when data loads
                     } else {
                         setMessage('Pustaka XLSX belum dimuat. Harap segarkan halaman.');
                     }
                 }
             }, [workbook, activeSheetName]);
+
+            // Initialize SpeechRecognition API
+            React.useEffect(() => {
+                if ('webkitSpeechRecognition' in window) {
+                    const SpeechRecognition = window.webkitSpeechRecognition;
+                    const recognitionInstance = new SpeechRecognition();
+                    recognitionInstance.continuous = false; // Listen for a single utterance
+                    recognitionInstance.interimResults = false; // Only return final results
+                    recognitionInstance.lang = 'id-ID'; // Set language to Indonesian
+
+                    recognitionInstance.onstart = () => {
+                        setVoiceStatus('Mendengarkan...');
+                    };
+
+                    recognitionInstance.onresult = (event) => {
+                        const transcript = event.results[0][0].transcript;
+                        setVoiceStatus(`Terdengar: "${transcript}"`);
+                        processVoiceCommand(transcript);
+                    };
+
+                    recognitionInstance.onerror = (event) => {
+                        console.error('Speech recognition error:', event.error);
+                        setVoiceStatus(`Kesalahan: ${event.error}. Coba lagi.`);
+                        setIsGeneratingAI(false); // Reset loading state
+                    };
+
+                    recognitionInstance.onend = () => {
+                        if (voiceStatus.startsWith('Mendengarkan')) { // If it ended without result
+                            setVoiceStatus('Tidak ada suara terdeteksi.');
+                            setIsGeneratingAI(false); // Reset loading state
+                        }
+                    };
+                    setRecognition(recognitionInstance);
+                } else {
+                    setVoiceStatus('Browser Anda tidak mendukung Web Speech API.');
+                }
+            }, []); // Run once on component mount
+
+            const inferColumnTypes = (data) => {
+                if (!data || data.length < 1) {
+                    setColumnTypes({});
+                    return;
+                }
+
+                const newColumnTypes = {};
+                const headerRow = data[0];
+                const dataRows = data.slice(1);
+
+                headerRow.forEach((header, colIndex) => {
+                    let numericCount = 0;
+                    let binaryCount = 0;
+                    let totalCells = 0;
+
+                    dataRows.forEach(row => {
+                        const cellValue = row[colIndex];
+                        if (cellValue !== null && cellValue !== undefined && cellValue !== '') {
+                            totalCells++;
+                            const numericValue = parseFloat(cellValue);
+                            if (!isNaN(numericValue)) {
+                                numericCount++;
+                            }
+                            const lowerCaseValue = String(cellValue).toLowerCase();
+                            if (['ya', 'tidak', 'true', 'false', '1', '0'].includes(lowerCaseValue)) {
+                                binaryCount++;
+                            }
+                        }
+                    });
+
+                    if (totalCells > 0) {
+                        if (numericCount / totalCells > 0.8) { // If more than 80% are numbers
+                            newColumnTypes[colIndex] = 'number';
+                        } else if (binaryCount / totalCells > 0.8) { // If more than 80% are binary
+                            newColumnTypes[colIndex] = 'binary';
+                        } else {
+                            newColumnTypes[colIndex] = 'text';
+                        }
+                    } else {
+                        newColumnTypes[colIndex] = 'text'; // Default to text if no data
+                    }
+                });
+                setColumnTypes(newColumnTypes);
+            };
 
             const handleFileUpload = (event) => {
                 const file = event.target.files[0];
@@ -86,6 +172,7 @@
                         } else {
                             setMessage('File Excel tidak memiliki sheet.');
                             setSheetData([]);
+                            setColumnTypes({});
                         }
                     } catch (error) {
                         console.error('Error reading Excel file:', error);
@@ -94,6 +181,7 @@
                         setSheetNames([]);
                         setActiveSheetName('');
                         setSheetData([]);
+                        setColumnTypes({});
                     }
                 };
 
@@ -103,6 +191,7 @@
                     setSheetNames([]);
                     setActiveSheetName('');
                     setSheetData([]);
+                    setColumnTypes({});
                 };
 
                 reader.readAsArrayBuffer(file);
@@ -113,7 +202,7 @@
                 setMessage(`Beralih ke sheet: ${sheetName}`);
             };
 
-            const handleCellChange = (rowIndex, colIndex, value) => {
+            const updateCellAndWorkbook = (rowIndex, colIndex, value) => {
                 const newSheetData = [...sheetData];
                 if (!newSheetData[rowIndex]) {
                     newSheetData[rowIndex] = [];
@@ -127,6 +216,16 @@
                 }
             };
 
+            const handleCellChange = (rowIndex, colIndex, value) => {
+                updateCellAndWorkbook(rowIndex, colIndex, value);
+            };
+
+            const handleBinaryToggle = (rowIndex, colIndex) => {
+                const currentValue = String(sheetData[rowIndex][colIndex]).toLowerCase();
+                const newValue = (currentValue === 'ya' || currentValue === 'true' || currentValue === '1') ? 'Tidak' : 'Ya';
+                updateCellAndWorkbook(rowIndex, colIndex, newValue);
+            };
+
             const handleAddRow = (content = null) => {
                 const newSheetData = [...sheetData];
                 const numCols = newSheetData.length > 0 ? Math.max(...newSheetData.map(row => row.length)) : 5;
@@ -138,6 +237,7 @@
 
                 newSheetData.push(newRow);
                 setSheetData(newSheetData);
+                inferColumnTypes(newSheetData); // Re-infer types after adding row
 
                 if (workbook && activeSheetName && typeof XLSX !== 'undefined' && XLSX.utils) {
                     const ws = XLSX.utils.aoa_to_sheet(newSheetData);
@@ -194,6 +294,7 @@
                 }
 
                 setSheetData(newSheetData);
+                inferColumnTypes(newSheetData); // Re-infer types after adding total row
 
                 if (workbook && activeSheetName && typeof XLSX !== 'undefined' && XLSX.utils) {
                     const ws = XLSX.utils.aoa_to_sheet(newSheetData);
@@ -249,6 +350,135 @@
                     setAiPrompt('');
                 }
             };
+
+            const startVoiceInput = () => {
+                if (recognition) {
+                    setVoiceStatus('Mendengarkan...');
+                    setShowVoiceInputModal(true);
+                    recognition.start();
+                } else {
+                    setVoiceStatus('Web Speech API tidak tersedia.');
+                }
+            };
+
+            const processVoiceCommand = async (command) => {
+                setVoiceStatus('Memproses perintah suara dengan AI...');
+                setIsGeneratingAI(true); // Reuse loading state for AI processing
+
+                // Prompt for Gemini to parse the command
+                const geminiPrompt = `Parse this command to identify the target column name, a unique identifier for the row (e.g., a value in the 'Nama' column), and the new value to be set. Respond in JSON format.
+                If the command is not clear, respond with an empty JSON object {}.
+                
+                Current spreadsheet headers: ${JSON.stringify(sheetData[0] || [])}
+                
+                Examples:
+                - "pada kolom nama di bawah audi ganti jadi yuni" -> { "column": "nama", "row_identifier_value": "audi", "new_value": "yuni" }
+                - "untuk yuli nilainya 85" -> { "column": "nilai", "row_identifier_value": "yuli", "new_value": 85 }
+                - "baris kedua kolom status menjadi selesai" -> { "row_index": 1, "column": "status", "new_value": "selesai" } // assuming 0-indexed for row_index
+                - "di baris dengan nama 'Budi' ubah 'Status' menjadi 'Aktif'" -> { "column": "Status", "row_identifier_value": "Budi", "new_value": "Aktif" }
+                - "set 'Jumlah' di baris 'Produk A' menjadi 150" -> { "column": "Jumlah", "row_identifier_value": "Produk A", "new_value": 150 }
+                - "untuk 'Produk B' di kolom 'Harga' masukkan 25000" -> { "column": "Harga", "row_identifier_value": "Produk B", "new_value": 25000 }
+                
+                Command to parse: "${command}"`;
+
+                try {
+                    let chatHistory = [];
+                    chatHistory.push({ role: "user", parts: [{ text: geminiPrompt }] });
+                    const payload = {
+                        contents: chatHistory,
+                        generationConfig: {
+                            responseMimeType: "application/json",
+                            responseSchema: {
+                                type: "OBJECT",
+                                properties: {
+                                    "column": { "type": "STRING" },
+                                    "row_identifier_value": { "type": "STRING" },
+                                    "row_index": { "type": "NUMBER" }, // Optional, for direct row index commands
+                                    "new_value": { "type": ["STRING", "NUMBER", "BOOLEAN"] }
+                                },
+                                "oneOf": [ // Ensure either row_identifier_value or row_index is present
+                                    { "required": ["row_identifier_value"] },
+                                    { "required": ["row_index"] }
+                                ]
+                            }
+                        }
+                    };
+                    const apiKey = "";
+                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    const result = await response.json();
+
+                    if (result.candidates && result.candidates.length > 0 &&
+                        result.candidates[0].content && result.candidates[0].content.parts &&
+                        result.candidates[0].content.parts.length > 0) {
+                        const jsonText = result.candidates[0].content.parts[0].text;
+                        const parsedCommand = JSON.parse(jsonText);
+
+                        const { column, row_identifier_value, row_index, new_value } = parsedCommand;
+
+                        if (!column || new_value === undefined) {
+                            setMessage('Perintah suara tidak jelas atau tidak lengkap.');
+                            setVoiceStatus('Perintah tidak dapat dipahami.');
+                            return;
+                        }
+
+                        const headerRow = sheetData[0];
+                        const targetColIndex = headerRow.findIndex(h => h.toLowerCase() === column.toLowerCase());
+
+                        if (targetColIndex === -1) {
+                            setMessage(`Kolom '${column}' tidak ditemukan.`);
+                            setVoiceStatus(`Kolom '${column}' tidak ditemukan.`);
+                            return;
+                        }
+
+                        let targetRowActualIndex = -1; // Actual index in sheetData (including header)
+
+                        if (row_identifier_value) {
+                            // Find row by identifier value (e.g., in the first column)
+                            for (let i = 1; i < sheetData.length; i++) { // Start from 1 to skip header
+                                if (String(sheetData[i][0]).toLowerCase() === String(row_identifier_value).toLowerCase()) {
+                                    targetRowActualIndex = i;
+                                    break;
+                                }
+                            }
+                        } else if (row_index !== undefined) {
+                            // Use direct row index (Gemini's row_index is 0-indexed for data rows, so add 1 for sheetData)
+                            if (row_index >= 0 && row_index < sheetData.length - 1) {
+                                targetRowActualIndex = row_index + 1; // +1 to account for header row in sheetData
+                            }
+                        }
+
+                        if (targetRowActualIndex === -1) {
+                            setMessage(`Baris dengan pengenal '${row_identifier_value || row_index}' tidak ditemukan.`);
+                            setVoiceStatus(`Baris tidak ditemukan.`);
+                            return;
+                        }
+
+                        updateCellAndWorkbook(targetRowActualIndex, targetColIndex, new_value);
+                        setMessage(`Berhasil memperbarui kolom '${column}' di baris '${row_identifier_value || (row_index + 1)}' menjadi '${new_value}'.`);
+                        setVoiceStatus('Berhasil diperbarui!');
+
+                    } else {
+                        setMessage('Gagal memproses perintah suara dengan AI. Coba lagi.');
+                        setVoiceStatus('Gagal memproses perintah.');
+                        console.error('Unexpected AI response structure for voice command:', result);
+                    }
+                } catch (error) {
+                    console.error('Error processing voice command with Gemini API:', error);
+                    setMessage('Terjadi kesalahan saat memproses perintah suara. Mohon coba lagi.');
+                    setVoiceStatus('Kesalahan pemrosesan.');
+                } finally {
+                    setIsGeneratingAI(false); // Reset loading state
+                    // setShowVoiceInputModal(false); // Keep modal open to show status
+                }
+            };
+
 
             const handleDownload = () => {
                 if (!workbook) {
@@ -331,6 +561,12 @@
                                             Hasilkan Konten AI
                                         </button>
                                         <button
+                                            onClick={startVoiceInput}
+                                            className="px-6 py-3 bg-sky-600 text-white font-semibold rounded-lg shadow-md hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-opacity-75 transition duration-300 ease-in-out"
+                                        >
+                                            Input Suara AI
+                                        </button>
+                                        <button
                                             onClick={handleDownload}
                                             className="px-6 py-3 bg-teal-600 text-white font-semibold rounded-lg shadow-md hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-teal-500 focus:ring-opacity-75 transition duration-300 ease-in-out"
                                         >
@@ -382,12 +618,33 @@
                                                 <tr key={rowIndex} className="hover:bg-green-50">
                                                     {row.map((cell, colIndex) => (
                                                         <td key={colIndex} className="px-4 py-2 whitespace-nowrap">
-                                                            <input
-                                                                type="text"
-                                                                value={cell !== null && cell !== undefined ? cell : ''}
-                                                                onChange={(e) => handleCellChange(rowIndex + 1, colIndex, e.target.value)}
-                                                                className="w-full border border-green-300 rounded-md px-2 py-1 text-sm text-gray-900 focus:ring-green-500 focus:border-green-500"
-                                                            />
+                                                            {/* Conditional Input Rendering */}
+                                                            {columnTypes[colIndex] === 'binary' ? (
+                                                                <button
+                                                                    onClick={() => handleBinaryToggle(rowIndex + 1, colIndex)}
+                                                                    className={`w-full px-2 py-1 rounded-md text-sm font-medium ${
+                                                                        (String(cell).toLowerCase() === 'ya' || String(cell).toLowerCase() === 'true' || String(cell).toLowerCase() === '1')
+                                                                            ? 'bg-green-500 text-white'
+                                                                            : 'bg-red-500 text-white'
+                                                                    } hover:opacity-80 transition duration-200`}
+                                                                >
+                                                                    {(String(cell).toLowerCase() === 'ya' || String(cell).toLowerCase() === 'true' || String(cell).toLowerCase() === '1') ? 'Ya' : 'Tidak'}
+                                                                </button>
+                                                            ) : columnTypes[colIndex] === 'number' ? (
+                                                                <input
+                                                                    type="number"
+                                                                    value={cell !== null && cell !== undefined ? cell : ''}
+                                                                    onChange={(e) => handleCellChange(rowIndex + 1, colIndex, parseFloat(e.target.value))}
+                                                                    className="w-full border border-green-300 rounded-md px-2 py-1 text-sm text-gray-900 focus:ring-green-500 focus:border-green-500"
+                                                                />
+                                                            ) : ( // Default to text
+                                                                <input
+                                                                    type="text"
+                                                                    value={cell !== null && cell !== undefined ? cell : ''}
+                                                                    onChange={(e) => handleCellChange(rowIndex + 1, colIndex, e.target.value)}
+                                                                    className="w-full border border-green-300 rounded-md px-2 py-1 text-sm text-gray-900 focus:ring-green-500 focus:border-green-500"
+                                                                />
+                                                            )}
                                                         </td>
                                                     ))}
                                                 </tr>
@@ -442,6 +699,43 @@
                                             'Hasilkan'
                                         )}
                                     </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Voice Input Modal */}
+                    {showVoiceInputModal && (
+                        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center p-4 z-50">
+                            <div className="bg-green-100 p-6 rounded-xl shadow-lg w-full max-w-md border border-green-300 text-center">
+                                <h2 className="text-2xl font-bold text-green-800 mb-4">Input Suara</h2>
+                                <p className="text-green-700 text-lg mb-4">{voiceStatus}</p>
+                                {isGeneratingAI && ( // Reusing isGeneratingAI for voice processing
+                                    <svg className="animate-spin h-8 w-8 text-green-700 mx-auto mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                )}
+                                <div className="flex justify-center gap-3">
+                                    <button
+                                        onClick={() => {
+                                            if (recognition) recognition.stop();
+                                            setShowVoiceInputModal(false);
+                                            setVoiceStatus('Siap');
+                                            setIsGeneratingAI(false); // Ensure loading is reset
+                                        }}
+                                        className="px-5 py-2 bg-red-600 text-white font-semibold rounded-lg shadow-md hover:bg-red-700 transition duration-300"
+                                    >
+                                        Tutup
+                                    </button>
+                                    {!isGeneratingAI && voiceStatus !== 'Mendengarkan...' && ( // Only show start if not already listening or processing
+                                        <button
+                                            onClick={startVoiceInput}
+                                            className="px-5 py-2 bg-green-700 text-white font-semibold rounded-lg shadow-md hover:bg-green-800 transition duration-300"
+                                        >
+                                            Mulai Mendengarkan
+                                        </button>
+                                    )}
                                 </div>
                             </div>
                         </div>
