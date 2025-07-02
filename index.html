@@ -6,27 +6,57 @@
     <title>Spreadsheet Alam</title>
     <!-- Tailwind CSS CDN for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Google Fonts - Merriweather for serif font -->
-    <link href="https://fonts.googleapis.com/css2?family=Merriweather:wght@400;700&display=swap" rel="stylesheet">
+    <!-- Google Fonts - Inter for a clean sans-serif look -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        /* Apply Merriweather as the serif font */
+        /* Apply Inter as the main font */
         body {
-            font-family: 'Merriweather', serif;
+            font-family: 'Inter', sans-serif;
         }
-        /* Custom scrollbar, keeping for consistency */
-        .overflow-x-auto::-webkit-scrollbar {
+        /* Custom scrollbar for overflow elements */
+        .custom-scrollbar::-webkit-scrollbar {
             height: 8px;
+            width: 8px;
         }
-        .overflow-x-auto::-webkit-scrollbar-track {
+        .custom-scrollbar::-webkit-scrollbar-track {
             background: #e0f2f1; /* Light green for track */
             border-radius: 10px;
         }
-        .overflow-x-auto::-webkit-scrollbar-thumb {
+        .custom-scrollbar::-webkit-scrollbar-thumb {
             background: #4caf50; /* Green for thumb */
             border-radius: 10px;
         }
-        .overflow-x-auto::-webkit-scrollbar-thumb:hover {
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
             background: #388e3c; /* Darker green on hover */
+        }
+        /* Table specific styles for better appearance */
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin-top: 20px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+            border-radius: 8px;
+            overflow: hidden; /* Ensures rounded corners apply to table content */
+        }
+        th, td {
+            border: 1px solid #e0e0e0;
+            padding: 8px 10px; /* Slightly more padding than before */
+            text-align: left;
+            font-size: 0.9em;
+        }
+        th {
+            background: #e9ecef; /* Lighter grey for headers */
+            font-weight: bold;
+            color: #495057;
+            position: sticky; /* Sticky header */
+            top: 0;
+            z-index: 1; /* Ensure header stays above scrolling content */
+        }
+        tbody tr:nth-child(even) {
+            background-color: #f8f9fa; /* Zebra striping for rows */
+        }
+        tbody tr:hover {
+            background-color: #e2f0ff; /* Highlight on hover */
         }
     </style>
 </head>
@@ -47,179 +77,238 @@
             const [workbook, setWorkbook] = React.useState(null);
             const [sheetNames, setSheetNames] = React.useState([]);
             const [activeSheetName, setActiveSheetName] = React.useState('');
-            const [sheetData, setSheetData] = React.useState([]); // Raw array of arrays for XLSX operations
-            const [matrixData, setMatrixData] = React.useState({}); // Dictionary-based data for display and manipulation
-            const [headers, setHeaders] = React.useState([]); // Headers extracted from sheetData[0]
+            // matrixData will now be an array of row objects, directly from AI parsing
+            const [matrixData, setMatrixData] = React.useState([]); 
+            const [headers, setHeaders] = React.useState([]); // Headers extracted by AI
             const [message, setMessage] = React.useState('');
             const fileInputRef = React.useRef(null);
 
             // State for AI generation feature
             const [showAIPromptModal, setShowAIPromptModal] = React.useState(false);
             const [aiPrompt, setAiPrompt] = React.useState('');
-            const [isGeneratingAI, setIsGeneratingAI] = React.useState(false);
+            const [isGeneratingAI, setIsGeneratingAI] = React.useState(false); // Used for both content gen and table parsing
 
             // State for voice input feature
             const [showVoiceInputModal, setShowVoiceInputModal] = React.useState(false);
             const [voiceStatus, setVoiceStatus] = React.useState('Siap');
             const [recognition, setRecognition] = React.useState(null);
 
-            // State to store inferred column types
-            const [columnTypes, setColumnTypes] = React.useState({}); // {colIndex: 'text' | 'number' | 'binary'}
+            // State to store inferred column types (based on AI-parsed data)
+            const [columnTypes, setColumnTypes] = React.useState({}); 
 
-            // New state to store the dynamically identified main identifier header name
-            const [mainIdentifierHeader, setMainIdentifierHeader] = React.useState(null);
-
-
-            // Helper to check if a value is predominantly text-like (contains letters, not just numbers/symbols)
-            const isPredominantlyText = (value) => {
-                if (typeof value !== 'string' && typeof value !== 'number') return false;
-                const str = String(value).trim();
-                if (str.length === 0) return false;
-                // Check for presence of letters and not just numbers/symbols
-                return /[a-zA-Z]/.test(str) && !/^\d+$/.test(str) && !/^[^\w\s]+$/.test(str);
+            // The main identifier for a row will be the value in the first column (headers[0])
+            // This is used for AI commands and internal mapping.
+            const getRowIdentifier = (rowObject, index) => {
+                if (headers.length > 0 && rowObject[headers[0]] !== undefined && String(rowObject[headers[0]]).trim() !== '') {
+                    return String(rowObject[headers[0]]).trim();
+                }
+                return `Baris ${index + 1}`; // Fallback if first column is empty
             };
 
-            // Function to dynamically find the best "name-like" column
-            const findDynamicMainIdentifierColumn = (headers, dataRows) => {
-                let bestColIndex = -1;
-                let highestScore = -1;
+            // Helper to infer column types based on the AI-parsed data
+            const inferColumnTypes = (currentHeaders, jsonRows) => {
+                if (!jsonRows || jsonRows.length < 1 || !currentHeaders || currentHeaders.length === 0) {
+                    setColumnTypes({});
+                    return;
+                }
 
-                const sampleSize = Math.min(dataRows.length, 50); // Sample first 50 rows for analysis
+                const newColumnTypes = {};
 
-                for (let colIndex = 0; colIndex < headers.length; colIndex++) {
-                    let textLikeCount = 0;
-                    let nmCount = 0; // Count of values containing 'n' or 'm'
-                    let totalNonEmpty = 0;
+                currentHeaders.forEach((header, colIndex) => {
+                    let numericCount = 0;
+                    let binaryCount = 0;
+                    let totalCells = 0;
 
-                    for (let i = 0; i < sampleSize; i++) {
-                        const row = dataRows[i];
-                        const cellValue = row[colIndex];
+                    jsonRows.forEach(rowObject => {
+                        const cellValue = rowObject[header]; // Access by header name
                         if (cellValue !== null && cellValue !== undefined && String(cellValue).trim() !== '') {
-                            totalNonEmpty++;
-                            const strValue = String(cellValue).toLowerCase();
-                            if (isPredominantlyText(cellValue)) {
-                                textLikeCount++;
+                            totalCells++;
+                            const numericValue = parseFloat(cellValue);
+                            if (!isNaN(numericValue)) {
+                                numericCount++;
                             }
-                            if (/[nm]/.test(strValue)) { // Check for 'n' or 'm'
-                                nmCount++;
+                            const lowerCaseValue = String(cellValue).toLowerCase();
+                            if (['ya', 'tidak', 'true', 'false', '1', '0'].includes(lowerCaseValue)) {
+                                binaryCount++;
                             }
                         }
-                    }
-
-                    if (totalNonEmpty > 0) {
-                        const textLikeRatio = textLikeCount / totalNonEmpty;
-                        const nmRatio = nmCount / totalNonEmpty;
-
-                        // Score based on being text-like and containing 'n' or 'm'
-                        // Prioritize columns that are more text-like and have more 'n'/'m'
-                        // Also, give a slight boost to earlier columns
-                        let score = (textLikeRatio * 0.7) + (nmRatio * 0.3); // Weighted score
-                        if (colIndex < 3) { // Boost for first few columns
-                            score += 0.1 * (3 - colIndex);
-                        }
-
-                        if (score > highestScore) {
-                            highestScore = score;
-                            bestColIndex = colIndex;
-                        }
-                    }
-                }
-
-                console.log(`[Deteksi Kolom] Header yang terdeteksi sebagai 'nama/pengenal' utama: ${bestColIndex !== -1 ? headers[bestColIndex] : 'Tidak Ditemukan'}`);
-                return bestColIndex;
-            };
-
-
-            // Utility function to convert raw sheet data (AoA) to dictionary matrix
-            const convertSheetDataToMatrix = (data, detectedMainIdentifierHeader) => {
-                if (!data || data.length < 1) return {};
-                const currentHeaders = data[0];
-                const dataRows = data.slice(1);
-                const newMatrixData = {};
-
-                const ignoredKeywords = ['total', 'jumlah', 'sum', 'rata-rata', 'average', 'max', 'min']; // Keywords to ignore in the main identifier column
-
-                for (let i = 0; i < dataRows.length; i++) {
-                    const row = dataRows[i];
-                    const rowObject = {};
-
-                    // Populate rowObject with all original headers and their values
-                    currentHeaders.forEach((header, colIndex) => {
-                        rowObject[header] = row[colIndex];
                     });
 
-                    // Get value for the main identifier based on the detected header
-                    const mainIdentifierValue = (detectedMainIdentifierHeader && rowObject[detectedMainIdentifierHeader] !== undefined) ? String(rowObject[detectedMainIdentifierHeader]).trim() : '';
+                    if (totalCells > 0) {
+                        if (numericCount / totalCells > 0.8) { // If more than 80% are numbers
+                            newColumnTypes[colIndex] = 'number';
+                        } else if (binaryCount / totalCells > 0.8) { // If more than 80% are binary
+                            newColumnTypes[colIndex] = 'binary';
+                        } else {
+                            newColumnTypes[colIndex] = 'text';
+                        }
+                    } else {
+                        newColumnTypes[colIndex] = 'text'; // Default to text if no data
+                    }
+                });
+                setColumnTypes(newColumnTypes);
+            };
+
+            // Function to process Excel data using Gemini AI
+            const processExcelDataWithAI = async (wb, sheetName) => {
+                setIsGeneratingAI(true); // Activate loading state for AI processing
+                setMessage(`Memproses sheet '${sheetName}' dengan AI...`);
+
+                try {
+                    const ws = wb.Sheets[sheetName];
                     
-                    // Determine the primary key for matrixData
-                    let primaryKey = mainIdentifierValue;
-                    if (!primaryKey && currentHeaders.length > 0) {
-                        primaryKey = String(rowObject[currentHeaders[0]] || `Baris ${i + 1}`).trim(); // Fallback to first column
-                    } else if (!primaryKey) {
-                        primaryKey = `Baris ${i + 1}`; // Generic fallback
+                    // Step 1: Get raw data as array of arrays (AoA) to handle complex headers
+                    // Use { header: 1, raw: true } to get all cells as they are, without auto-header detection
+                    const rawAoAData = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true }); 
+
+                    if (rawAoAData.length === 0) {
+                        setHeaders([]);
+                        setMatrixData([]);
+                        setColumnTypes({});
+                        setMessage(`Sheet '${sheetName}' kosong atau tidak memiliki data yang dapat diproses.`);
+                        setIsGeneratingAI(false);
+                        return;
                     }
 
-                    // Check if this row should be ignored (e.g., a total row)
-                    const isTotalRow = ignoredKeywords.some(keyword => 
-                        primaryKey.toLowerCase().includes(keyword)
-                    );
+                    // Step 2: Convert raw AoA data to CSV string for AI input.
+                    // This is robust for merged cells as XLSX.utils.sheet_to_csv repeats values.
+                    const csvString = XLSX.utils.sheet_to_csv(ws, { FS: ',', RS: '\n', blankrows: false });
 
-                    if (isTotalRow) {
-                        console.log(`[Filter Baris] Mengabaikan baris: ${primaryKey} (terdeteksi sebagai baris total/kalkulasi)`);
-                        continue; // Skip this row
+                    if (!csvString.trim()) {
+                        setHeaders([]);
+                        setMatrixData([]);
+                        setColumnTypes({});
+                        setMessage(`Sheet '${sheetName}' kosong atau tidak memiliki data yang dapat diproses.`);
+                        setIsGeneratingAI(false);
+                        return;
                     }
 
-                    // Handle potential duplicate primary keys
-                    let uniquePrimaryKey = primaryKey;
-                    let counter = 1;
-                    while (newMatrixData.hasOwnProperty(uniquePrimaryKey)) {
-                        uniquePrimaryKey = `${primaryKey} (${counter++})`;
-                    }
-                    newMatrixData[uniquePrimaryKey] = rowObject;
-                }
-                return newMatrixData;
-            };
+                    // Prompt for Gemini to parse the table
+                    const geminiPrompt = `Ekstrak data tabel dari teks berikut.
+                    Identifikasi header dari baris pertama yang tidak kosong. Jika ada header yang digabungkan atau multi-baris, coba ratakan menjadi satu baris header yang bermakna.
+                    Perlakukan setiap baris selanjutnya yang tidak kosong sebagai entri data.
+                    Abaikan baris apa pun yang terlihat seperti baris ringkasan atau total (misalnya, mengandung 'Total', 'Jumlah', 'Sum', 'Rata-rata', 'Average', 'Max', 'Min' pada kolom pertama atau kunci).
+                    Berikan output sebagai objek JSON dengan dua kunci: \`headers\` (array string dari nama header) dan \`rows\` (array objek, di mana setiap objek merepresentasikan baris data dengan kunci adalah header dan nilai adalah konten sel).
+                    Pastikan semua nilai dipertahankan sebagai tipe aslinya jika memungkinkan (angka, string, boolean).
+                    
+                    Data tabel (format CSV):
+                    \`\`\`csv
+                    ${csvString}
+                    \`\`\`
+                    
+                    Output JSON:`;
 
-            // Utility function to convert dictionary matrix back to raw sheet data (AoA)
-            const convertMatrixDataToSheetData = (matrix, originalHeaders) => {
-                const newSheetData = [originalHeaders]; // Start with original headers
+                    let chatHistory = [];
+                    chatHistory.push({ role: "user", parts: [{ text: geminiPrompt }] });
+                    const payload = {
+                        contents: chatHistory,
+                        generationConfig: {
+                            responseMimeType: "application/json",
+                            responseSchema: {
+                                type: "OBJECT",
+                                properties: {
+                                    "headers": {
+                                        type: "ARRAY",
+                                        items: { type: "STRING" }
+                                    },
+                                    "rows": {
+                                        type: "ARRAY",
+                                        items: { type: "OBJECT" } // Object schema is flexible for any table structure
+                                    }
+                                },
+                                required: ["headers", "rows"]
+                            }
+                        }
+                    };
+                    const apiKey = ""; // API key is provided by the environment
+                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
 
-                for (const primaryKey of Object.keys(matrix)) {
-                    const rowObject = matrix[primaryKey];
-                    const rowArray = [];
-
-                    originalHeaders.forEach((header) => {
-                        rowArray.push(rowObject[header] !== undefined ? rowObject[header] : '');
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
                     });
-                    newSheetData.push(rowArray);
+
+                    const result = await response.json();
+
+                    if (result.candidates && result.candidates.length > 0 &&
+                        result.candidates[0].content && result.candidates[0].content.parts &&
+                        result.candidates[0].content.parts.length > 0) {
+                        let jsonText = result.candidates[0].content.parts[0].text;
+                        
+                        // Log the raw JSON text for debugging
+                        console.log("[AI Raw JSON Output]:", jsonText);
+
+                        // Robust parsing: Try to find the JSON object within the text
+                        // This regex looks for a string starting with '{' and ending with '}'
+                        // and tries to capture everything in between.
+                        const jsonRegex = /{[\s\S]*}/;
+                        const jsonMatch = jsonText.match(jsonRegex);
+                        
+                        if (jsonMatch && jsonMatch[0]) {
+                            jsonText = jsonMatch[0]; // Use the matched JSON string
+                        } else {
+                            // Fallback if regex doesn't find a clean JSON block
+                            // This might happen if AI returns only partial JSON or non-JSON text
+                            setMessage('AI mengembalikan respons yang tidak dapat diuraikan sebagai JSON. Coba lagi atau periksa format file.');
+                            console.error('JSON object boundaries not found. Raw AI text:', jsonText);
+                            setHeaders([]);
+                            setMatrixData([]);
+                            setColumnTypes({});
+                            setIsGeneratingAI(false);
+                            return;
+                        }
+
+                        let parsedData;
+                        try {
+                            parsedData = JSON.parse(jsonText);
+                        } catch (parseError) {
+                            setMessage('AI mengembalikan respons yang tidak dapat diuraikan sebagai JSON. Coba lagi atau periksa format file.');
+                            console.error('JSON parsing error:', parseError);
+                            console.error('Text attempted to parse:', jsonText);
+                            setHeaders([]);
+                            setMatrixData([]);
+                            setColumnTypes({});
+                            setIsGeneratingAI(false);
+                            return;
+                        }
+
+                        if (parsedData.headers && Array.isArray(parsedData.headers) &&
+                            parsedData.rows && Array.isArray(parsedData.rows)) {
+                            setHeaders(parsedData.headers);
+                            setMatrixData(parsedData.rows);
+                            inferColumnTypes(parsedData.headers, parsedData.rows); // Infer types based on AI-parsed data
+                            setMessage(`Sheet '${sheetName}' berhasil diproses oleh AI.`);
+                        } else {
+                            setMessage('AI gagal menginterpretasikan struktur tabel. Coba lagi atau periksa format file.');
+                            console.error('Unexpected AI parsed data structure:', parsedData);
+                            setHeaders([]);
+                            setMatrixData([]);
+                            setColumnTypes({});
+                        }
+                    } else {
+                        setMessage('Gagal mendapatkan respons dari AI. Coba lagi.');
+                        console.error('Unexpected AI response structure:', result);
+                        setHeaders([]);
+                        setMatrixData([]);
+                        setColumnTypes({});
+                    }
+                } catch (error) {
+                    console.error('Error processing Excel data with AI:', error);
+                    setMessage(`Terjadi kesalahan saat memproses file dengan AI: ${error.message}.`);
+                    setHeaders([]);
+                    setMatrixData([]);
+                    setColumnTypes({});
+                } finally {
+                    setIsGeneratingAI(false); // Deactivate loading state
                 }
-                return newSheetData;
             };
 
             // Effect to load data when workbook or active sheet changes
             React.useEffect(() => {
                 if (workbook && activeSheetName) {
                     if (typeof XLSX !== 'undefined' && XLSX.utils) {
-                        const ws = workbook.Sheets[activeSheetName];
-                        const jsonSheetData = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true });
-                        setSheetData(jsonSheetData);
-
-                        if (jsonSheetData.length > 0) {
-                            setHeaders(jsonSheetData[0]); // Store original headers
-                            
-                            // Dynamically find the main identifier column
-                            const detectedMainIdColIndex = findDynamicMainIdentifierColumn(jsonSheetData[0], jsonSheetData.slice(1));
-                            const detectedMainIdHeader = detectedMainIdColIndex !== -1 ? jsonSheetData[0][detectedMainIdColIndex] : (jsonSheetData[0].length > 0 ? jsonSheetData[0][0] : null);
-                            setMainIdentifierHeader(detectedMainIdHeader);
-
-                            setMatrixData(convertSheetDataToMatrix(jsonSheetData, detectedMainIdHeader));
-                            inferColumnTypes(jsonSheetData); // Infer types based on original data
-                        } else {
-                            setHeaders([]);
-                            setMatrixData({});
-                            setColumnTypes({});
-                            setMainIdentifierHeader(null);
-                        }
+                        processExcelDataWithAI(workbook, activeSheetName); // Use AI for processing
                     } else {
                         setMessage('Pustaka XLSX belum dimuat. Harap segarkan halaman.');
                     }
@@ -263,51 +352,6 @@
                 }
             }, []); // Run once on component mount
 
-            const inferColumnTypes = (data) => {
-                if (!data || data.length < 1) {
-                    setColumnTypes({});
-                    return;
-                }
-
-                const newColumnTypes = {};
-                const headerRow = data[0];
-                const dataRows = data.slice(1);
-
-                headerRow.forEach((header, colIndex) => {
-                    let numericCount = 0;
-                    let binaryCount = 0;
-                    let totalCells = 0;
-
-                    dataRows.forEach(row => {
-                        const cellValue = row[colIndex];
-                        if (cellValue !== null && cellValue !== undefined && cellValue !== '') {
-                            totalCells++;
-                            const numericValue = parseFloat(cellValue);
-                            if (!isNaN(numericValue)) {
-                                numericCount++;
-                            }
-                            const lowerCaseValue = String(cellValue).toLowerCase();
-                            if (['ya', 'tidak', 'true', 'false', '1', '0'].includes(lowerCaseValue)) {
-                                binaryCount++;
-                            }
-                        }
-                    });
-
-                    if (totalCells > 0) {
-                        if (numericCount / totalCells > 0.8) { // If more than 80% are numbers
-                            newColumnTypes[colIndex] = 'number';
-                        } else if (binaryCount / totalCells > 0.8) { // If more than 80% are binary
-                            newColumnTypes[colIndex] = 'binary';
-                        } else {
-                            newColumnTypes[colIndex] = 'text';
-                        }
-                    } else {
-                        newColumnTypes[colIndex] = 'text'; // Default to text if no data
-                    }
-                });
-                setColumnTypes(newColumnTypes);
-            };
-
             const handleFileUpload = (event) => {
                 const file = event.target.files[0];
                 if (!file) {
@@ -326,19 +370,18 @@
                 reader.onload = (e) => {
                     try {
                         const data = new Uint8Array(e.target.result);
-                        const wb = XLSX.read(data, { type: 'array' });
+                        const wb = XLSX.read(data, { type: "array", cellDates: true });
                         setWorkbook(wb);
                         setSheetNames(wb.SheetNames);
                         if (wb.SheetNames.length > 0) {
                             setActiveSheetName(wb.SheetNames[0]);
                             setMessage(`File "${file.name}" berhasil diunggah. Memuat sheet pertama.`);
+                            // useEffect will trigger processExcelDataWithAI
                         } else {
                             setMessage('File Excel tidak memiliki sheet.');
-                            setSheetData([]);
-                            setMatrixData({});
+                            setMatrixData([]);
                             setHeaders([]);
                             setColumnTypes({});
-                            setMainIdentifierHeader(null);
                         }
                     } catch (error) {
                         console.error('Error reading Excel file:', error);
@@ -346,11 +389,9 @@
                         setWorkbook(null);
                         setSheetNames([]);
                         setActiveSheetName('');
-                        setSheetData([]);
-                        setMatrixData({});
+                        setMatrixData([]);
                         setHeaders([]);
                         setColumnTypes({});
-                        setMainIdentifierHeader(null);
                     }
                 };
 
@@ -359,11 +400,9 @@
                     setWorkbook(null);
                     setSheetNames([]);
                     setActiveSheetName('');
-                    setSheetData([]);
-                    setMatrixData({});
+                    setMatrixData([]);
                     setHeaders([]);
                     setColumnTypes({});
-                    setMainIdentifierHeader(null);
                 };
 
                 reader.readAsArrayBuffer(file);
@@ -372,130 +411,124 @@
             const handleSheetChange = (sheetName) => {
                 setActiveSheetName(sheetName);
                 setMessage(`Beralih ke sheet: ${sheetName}`);
+                // useEffect will trigger processExcelDataWithAI
             };
 
-            // Update cell in matrixData and then sync back to sheetData and workbook
-            const updateCell = (primaryKey, columnHeader, value) => {
-                const newMatrixData = { ...matrixData };
-                if (!newMatrixData[primaryKey]) {
-                    newMatrixData[primaryKey] = {};
+            // Update cell in matrixData (array of objects) and then sync back to workbook
+            const updateCell = (rowIndex, columnHeader, value) => {
+                const newMatrixData = [...matrixData];
+                // Find the actual row object to update
+                const targetRowObject = newMatrixData[rowIndex]; 
+
+                if (targetRowObject) {
+                    targetRowObject[columnHeader] = value;
+                    setMatrixData(newMatrixData);
+
+                    // Sync back to workbook
+                    if (workbook && activeSheetName && typeof XLSX !== 'undefined' && XLSX.utils) {
+                        const newSheetDataAoA = convertMatrixDataToSheetData(newMatrixData, headers);
+                        const ws = XLSX.utils.aoa_to_sheet(newSheetDataAoA);
+                        workbook.Sheets[activeSheetName] = ws;
+                    }
+                } else {
+                    console.error("Row not found for update:", rowIndex, columnHeader);
                 }
-                newMatrixData[primaryKey][columnHeader] = value; // Update the specific attribute
-                setMatrixData(newMatrixData);
-
-                // Sync back to sheetData and workbook
-                if (workbook && activeSheetName && typeof XLSX !== 'undefined' && XLSX.utils) {
-                    const newSheetData = convertMatrixDataToSheetData(newMatrixData, headers);
-                    setSheetData(newSheetData); // Update raw sheetData state
-                    const ws = XLSX.utils.aoa_to_sheet(newSheetData);
-                    workbook.Sheets[activeSheetName] = ws;
-                    inferColumnTypes(newSheetData); // Re-infer types after update
-                }
             };
 
-            const handleCellChange = (primaryKey, columnHeader, value) => {
-                updateCell(primaryKey, columnHeader, value);
+            const handleCellChange = (rowIndex, columnHeader, value) => {
+                updateCell(rowIndex, columnHeader, value);
             };
 
-            const handleBinaryToggle = (primaryKey, columnHeader) => {
-                const currentValue = String(matrixData[primaryKey][columnHeader]).toLowerCase();
+            const handleBinaryToggle = (rowIndex, columnHeader) => {
+                const currentValue = String(matrixData[rowIndex][columnHeader]).toLowerCase();
                 const newValue = (currentValue === 'ya' || currentValue === 'true' || currentValue === '1') ? 'Tidak' : 'Ya';
-                updateCell(primaryKey, columnHeader, newValue);
+                updateCell(rowIndex, columnHeader, newValue);
             };
 
             const handleAddRow = (content = null) => {
-                const newMatrixData = { ...matrixData };
-                // Generate a unique primary key for the new row
-                let newPrimaryKey = content || `Baris Baru ${Object.keys(newMatrixData).length + 1}`;
-                let counter = 1;
-                while (newMatrixData.hasOwnProperty(newPrimaryKey)) {
-                    newPrimaryKey = `${content || `Baris Baru ${Object.keys(newMatrixData).length + 1}`} (${counter++})`;
-                }
-
+                const newMatrixData = [...matrixData];
                 const newRowObject = {};
+                
                 // Initialize all headers with empty strings
                 headers.forEach(header => {
                     newRowObject[header] = '';
                 });
 
-                // If content is provided, try to parse it and put it in the main identifier column
-                if (content && mainIdentifierHeader) {
-                    newRowObject[mainIdentifierHeader] = content;
-                } else if (content && headers.length > 0) {
-                    newRowObject[headers[0]] = content; // Fallback to first column if mainIdentifierHeader is not set
+                // If content is provided, put it in the first column
+                if (content && headers.length > 0) {
+                    newRowObject[headers[0]] = content;
                 } else if (content) {
                     newRowObject['Kolom 1'] = content; // Fallback if no headers at all
                 }
 
-                newMatrixData[newPrimaryKey] = newRowObject;
+                newMatrixData.push(newRowObject);
                 setMatrixData(newMatrixData);
 
-                // Sync back to sheetData and workbook
+                // Sync back to workbook
                 if (workbook && activeSheetName && typeof XLSX !== 'undefined' && XLSX.utils) {
-                    const newSheetData = convertMatrixDataToSheetData(newMatrixData, headers);
-                    setSheetData(newSheetData);
-                    const ws = XLSX.utils.aoa_to_sheet(newSheetData);
+                    const newSheetDataAoA = convertMatrixDataToSheetData(newMatrixData, headers);
+                    const ws = XLSX.utils.aoa_to_sheet(newSheetDataAoA);
                     workbook.Sheets[activeSheetName] = ws;
-                    inferColumnTypes(newSheetData); // Re-infer types after adding row
                     setMessage(content ? 'Baris baru dengan konten AI ditambahkan.' : 'Baris baru ditambahkan.');
                 }
             };
 
             const handleCalculateTotals = () => {
-                if (!matrixData || Object.keys(matrixData).length === 0 || headers.length === 0) {
+                if (!matrixData || matrixData.length === 0 || headers.length === 0) {
                     setMessage('Tidak ada data untuk dihitung total.');
                     return;
                 }
 
-                const totals = {};
-                headers.forEach((header) => { // Iterate over all headers
-                    // Skip the main identifier column for summation
-                    if (header === mainIdentifierHeader) {
-                        totals[header] = 'Total'; // Set the main identifier column of total row to 'Total'
+                const totalsRowObject = {};
+                headers.forEach((header) => {
+                    if (header === headers[0]) { // First column for "Total" label
+                        totalsRowObject[header] = 'Total';
                         return;
                     }
 
                     let sum = 0;
                     let isNumericColumn = true;
-                    for (const primaryKey in matrixData) {
-                        const cellValue = matrixData[primaryKey][header];
+                    matrixData.forEach(rowObject => {
+                        const cellValue = rowObject[header];
                         const numericValue = parseFloat(cellValue);
                         if (!isNaN(numericValue) && cellValue !== '' && cellValue !== null && cellValue !== undefined) {
                             sum += numericValue;
                         } else if (cellValue !== '' && cellValue !== null && cellValue !== undefined) {
                             isNumericColumn = false;
-                            break; // Not a purely numeric column
                         }
-                    }
+                    });
+
                     if (isNumericColumn) {
-                        totals[header] = sum;
+                        totalsRowObject[header] = sum;
                     } else {
                         totals[header] = ''; // Non-numeric columns don't get a sum
                     }
                 });
 
-                const newMatrixData = { ...matrixData };
-                // Check if a "Total" row already exists based on primary key
-                let totalRowExists = false;
-                if (newMatrixData.hasOwnProperty('Total')) {
-                    newMatrixData['Total'] = { ...totals }; // Update existing total row
-                    totalRowExists = true;
+                const newMatrixData = [...matrixData];
+                
+                // Find and replace existing "Total" row, or add a new one
+                let totalRowIndex = -1;
+                for (let i = 0; i < newMatrixData.length; i++) {
+                    if (String(newMatrixData[i][headers[0]] || '').toLowerCase() === 'total') {
+                        totalRowIndex = i;
+                        break;
+                    }
                 }
 
-                if (!totalRowExists) {
-                    // If no existing total row, create a new one with 'Total' as its primary key
-                    newMatrixData['Total'] = { ...totals };
+                if (totalRowIndex !== -1) {
+                    newMatrixData[totalRowIndex] = totalsRowObject;
+                } else {
+                    newMatrixData.push(totalsRowObject);
                 }
-
+                
                 setMatrixData(newMatrixData);
 
-                // Sync back to sheetData and workbook
+                // Sync back to workbook
                 if (workbook && activeSheetName && typeof XLSX !== 'undefined' && XLSX.utils) {
-                    const newSheetData = convertMatrixDataToSheetData(newMatrixData, headers);
-                    setSheetData(newSheetData);
-                    const ws = XLSX.utils.aoa_to_sheet(newSheetData);
+                    const newSheetDataAoA = convertMatrixDataToSheetData(newMatrixData, headers);
+                    const ws = XLSX.utils.aoa_to_sheet(newSheetDataAoA);
                     workbook.Sheets[activeSheetName] = ws;
-                    inferColumnTypes(newSheetData); // Re-infer types after adding total row
                     setMessage('Total kolom dihitung dan ditambahkan.');
                 }
             };
@@ -562,16 +595,18 @@
                 setVoiceStatus('Memproses perintah suara dengan AI...');
                 setIsGeneratingAI(true); // Reuse loading state for AI processing
 
-                const geminiPrompt = `Parse this command to identify the target column's HEADER NAME (case-insensitive), the unique identifier for the row (which is the value displayed as the card title in your spreadsheet, case-insensitive), and the new value to be set. Respond in JSON format.
+                // Prepare current row identifiers for the AI prompt
+                const currentRowIdentifiers = matrixData.map((row, index) => getRowIdentifier(row, index));
+
+                const geminiPrompt = `Parse this command to identify the target column's HEADER NAME (case-insensitive), the unique identifier for the row (which is the value from the first column of your spreadsheet, case-insensitive), and the new value to be set. Respond in JSON format.
                 If the command is not clear, respond with an empty JSON object {}.
                 
                 Current spreadsheet HEADER NAMES: ${JSON.stringify(headers || [])}
-                Current ROW IDENTIFIERS (these are the full card titles, example: "Amphibia", "Reptilia", "Spesies X (Famili A)"): ${JSON.stringify(Object.keys(matrixData) || [])}
+                Current ROW IDENTIFIERS (values from the first column of each data row, example: "Amphibia", "Reptilia"): ${JSON.stringify(currentRowIdentifiers || [])}
                 
                 Examples:
                 - "Untuk baris 'Amphibia' di kolom 'jum', atur nilai menjadi 10" -> { "column": "jum", "row_identifier_value": "Amphibia", "new_value": 10 }
                 - "Untuk baris 'Reptilia' di kolom 'F', masukkan 0.75" -> { "column": "F", "row_identifier_value": "Reptilia", "new_value": 0.75 }
-                - "Untuk baris 'Spesies X (Famili A)' di kolom 'status', ubah menjadi 'Dilindungi'" -> { "column": "status', "row_identifier_value": "Spesies X (Famili A)", "new_value": "Dilindungi" }
                 
                 Command to parse: "${command}"`;
 
@@ -618,10 +653,12 @@
                             return;
                         }
 
-                        // Find the actual primary key (case-insensitive match)
-                        const actualPrimaryKey = Object.keys(matrixData).find(key => String(key).toLowerCase() === String(row_identifier_value).toLowerCase());
+                        // Find the actual row index based on the row identifier
+                        const targetRowIndex = matrixData.findIndex((row, index) => 
+                            String(getRowIdentifier(row, index)).toLowerCase() === String(row_identifier_value).toLowerCase()
+                        );
 
-                        if (!actualPrimaryKey) {
+                        if (targetRowIndex === -1) {
                             setMessage(`Baris dengan pengenal '${row_identifier_value}' tidak ditemukan.`);
                             setVoiceStatus(`Baris tidak ditemukan.`);
                             return;
@@ -636,8 +673,8 @@
                             return;
                         }
 
-                        updateCell(actualPrimaryKey, actualColumnHeader, new_value);
-                        setMessage(`Berhasil memperbarui kolom '${actualColumnHeader}' di baris '${actualPrimaryKey}' menjadi '${new_value}'.`);
+                        updateCell(targetRowIndex, actualColumnHeader, new_value);
+                        setMessage(`Berhasil memperbarui kolom '${actualColumnHeader}' di baris '${row_identifier_value}' menjadi '${new_value}'.`);
                         setVoiceStatus('Berhasil diperbarui!');
 
                     } else {
@@ -671,11 +708,13 @@
                     const wb = XLSX.utils.book_new();
                     sheetNames.forEach(sheetName => {
                         let ws;
+                        // For the active sheet, convert current matrixData back to AoA
                         if (sheetName === activeSheetName) {
-                            // Convert current matrixData back to AoA for the active sheet
                             ws = XLSX.utils.aoa_to_sheet(convertMatrixDataToSheetData(matrixData, headers));
                         } else {
-                            // For other sheets, use the original workbook sheet
+                            // For other sheets, use the original workbook sheet data
+                            // This requires storing original AoA for all sheets or re-reading them,
+                            // for simplicity, we'll just use the workbook's current state for non-active sheets.
                             ws = workbook.Sheets[sheetName];
                         }
                         XLSX.utils.book_append_sheet(wb, ws, sheetName);
@@ -690,20 +729,50 @@
             };
 
             return (
-                <div className="min-h-screen flex flex-col font-serif bg-gradient-to-br from-green-50 to-green-200">
-                    {/* Header Section */}
-                    <header className="bg-green-800 text-white p-4 shadow-md">
+                <div className="min-h-screen flex flex-col font-sans bg-green-100 text-gray-800">
+                    {/* Header Section - Simplified and Clean */}
+                    <header className="bg-green-700 text-white p-4 shadow-lg">
                         <div className="container mx-auto flex justify-between items-center">
-                            <h1 className="text-2xl sm:text-3xl font-bold">🌿 Spreadsheet Alam</h1>
+                            <h1 className="text-2xl font-semibold">Spreadsheet Alam</h1>
+                            <div className="flex space-x-4">
+                                {/* Search Icon */}
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor" className="w-6 h-6">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+                                </svg>
+                                {/* Bag Icon */}
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor" className="w-6 h-6">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 10.5V6a3.75 3.75 0 10-7.5 0v4.5m11.356-1.993l1.263 12c.07.665-.45 1.243-1.119 1.243H4.25a1.125 1.125 0 01-1.12-1.243l1.264-12A1.125 1.125 0 015.513 7.5h12.974c.576 0 1.059.435 1.119 1.007zM8.625 10.5a.375.375 0 11-.75 0 .375.375 0 01.75 0zm7.5 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
+                                </svg>
+                            </div>
                         </div>
                     </header>
 
-                    {/* Main Content */}
+                    {/* Main Content Area */}
                     <main className="flex-grow flex flex-col items-center p-4">
-                        <div className="bg-green-100 p-6 rounded-xl shadow-lg w-full max-w-6xl border border-green-300">
-                            <h2 className="text-2xl font-bold text-center text-green-800 mb-6">Editor Spreadsheet Interaktif</h2>
+                        <div className="bg-white p-6 rounded-xl shadow-lg w-full max-w-6xl border border-gray-200">
+                            <h2 className="text-2xl font-semibold text-center text-gray-800 mb-6">Editor Spreadsheet Interaktif</h2>
 
-                            <div className="mb-6 flex flex-col sm:flex-row items-center justify-center gap-4 flex-wrap">
+                            {/* Sheet Navigation / Filters */}
+                            {sheetNames.length > 1 && (
+                                <div className="mb-4 flex flex-wrap justify-center gap-2">
+                                    {sheetNames.map((name) => (
+                                        <button
+                                            key={name}
+                                            onClick={() => handleSheetChange(name)}
+                                            className={`px-4 py-2 rounded-full text-sm font-medium transition duration-300 ease-in-out ${
+                                                activeSheetName === name
+                                                    ? 'bg-green-600 text-white shadow-md'
+                                                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                            }`}
+                                        >
+                                            {name}
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+
+                            {/* Main Action Buttons */}
+                            <div className="mb-6 flex flex-col sm:flex-row items-center justify-center gap-3 flex-wrap">
                                 <input
                                     type="file"
                                     accept=".xlsx, .xls"
@@ -713,7 +782,7 @@
                                 />
                                 <button
                                     onClick={() => fileInputRef.current.click()}
-                                    className="px-6 py-3 bg-green-700 text-white font-semibold rounded-lg shadow-md hover:bg-green-800 focus:outline-none focus:ring-2 focus:ring-green-600 focus:ring-opacity-75 transition duration-300 ease-in-out"
+                                    className="px-5 py-2 bg-green-600 text-white font-semibold rounded-full shadow-sm hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-75 transition duration-300 ease-in-out"
                                 >
                                     Unggah File Excel
                                 </button>
@@ -722,31 +791,31 @@
                                     <>
                                         <button
                                             onClick={() => handleAddRow()}
-                                            className="px-6 py-3 bg-emerald-600 text-white font-semibold rounded-lg shadow-md hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-opacity-75 transition duration-300 ease-in-out"
+                                            className="px-5 py-2 bg-blue-500 text-white font-semibold rounded-full shadow-sm hover:bg-blue-600 transition duration-300 ease-in-out"
                                         >
                                             Tambah Baris
                                         </button>
                                         <button
                                             onClick={handleCalculateTotals}
-                                            className="px-6 py-3 bg-lime-600 text-white font-semibold rounded-lg shadow-md hover:bg-lime-700 focus:outline-none focus:ring-2 focus:ring-lime-500 focus:ring-opacity-75 transition duration-300 ease-in-out"
+                                            className="px-5 py-2 bg-purple-500 text-white font-semibold rounded-full shadow-sm hover:bg-purple-600 transition duration-300 ease-in-out"
                                         >
                                             Hitung Semua Total
                                         </button>
                                         <button
                                             onClick={() => setShowAIPromptModal(true)}
-                                            className="px-6 py-3 bg-amber-600 text-white font-semibold rounded-lg shadow-md hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-opacity-75 transition duration-300 ease-in-out"
+                                            className="px-5 py-2 bg-yellow-500 text-white font-semibold rounded-full shadow-sm hover:bg-yellow-600 transition duration-300 ease-in-out"
                                         >
                                             Hasilkan Konten AI
                                         </button>
                                         <button
                                             onClick={startVoiceInput}
-                                            className="px-6 py-3 bg-sky-600 text-white font-semibold rounded-lg shadow-md hover:bg-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-opacity-75 transition duration-300 ease-in-out"
+                                            className="px-5 py-2 bg-indigo-500 text-white font-semibold rounded-full shadow-sm hover:bg-indigo-600 transition duration-300 ease-in-out"
                                         >
                                             Input Suara AI
                                         </button>
                                         <button
                                             onClick={handleDownload}
-                                            className="px-6 py-3 bg-teal-600 text-white font-semibold rounded-lg shadow-md hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-teal-500 focus:ring-opacity-75 transition duration-300 ease-in-out"
+                                            className="px-5 py-2 bg-teal-500 text-white font-semibold rounded-full shadow-sm hover:bg-teal-600 transition duration-300 ease-in-out"
                                         >
                                             Unduh Excel
                                         </button>
@@ -755,51 +824,47 @@
                             </div>
 
                             {message && (
-                                <p className="text-center text-green-700 mb-4">{message}</p>
+                                <p className="text-center text-gray-600 mb-4">{message}</p>
                             )}
 
-                            {sheetNames.length > 1 && (
-                                <div className="mb-4 flex flex-wrap justify-center gap-2">
-                                    {sheetNames.map((name) => (
-                                        <button
-                                            key={name}
-                                            onClick={() => handleSheetChange(name)}
-                                            className={`px-4 py-2 rounded-lg text-sm font-medium transition duration-300 ease-in-out ${
-                                                activeSheetName === name
-                                                    ? 'bg-green-600 text-white shadow-md'
-                                                    : 'bg-green-200 text-green-800 hover:bg-green-300'
-                                            }`}
-                                        >
-                                            {name}
-                                        </button>
-                                    ))}
+                            {/* Data Table Display */}
+                            {isGeneratingAI ? (
+                                <div className="flex justify-center items-center h-48">
+                                    <svg className="animate-spin h-10 w-10 text-green-700" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    <p className="ml-3 text-lg text-gray-700">Memproses data dengan AI...</p>
                                 </div>
-                            )}
+                            ) : matrixData.length > 0 && headers.length > 0 ? (
+                                <div className="overflow-x-auto custom-scrollbar rounded-lg border border-gray-200 shadow-sm">
+                                    <table className="min-w-full divide-y divide-gray-200 bg-white">
+                                        <thead className="bg-gray-50">
+                                            <tr>
+                                                {headers.map((header, index) => (
+                                                    <th
+                                                        key={index}
+                                                        className="px-4 py-2 text-left text-xs font-medium text-gray-700 uppercase tracking-wider"
+                                                    >
+                                                        {header}
+                                                    </th>
+                                                ))}
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-gray-200">
+                                            {matrixData.map((rowObject, rowIndex) => (
+                                                <tr key={rowIndex} className="hover:bg-gray-50">
+                                                    {headers.map((columnHeader, colIndex) => {
+                                                        const cellValue = rowObject[columnHeader];
+                                                        const originalColIndex = headers.indexOf(columnHeader); // Get original index for type inference
 
-                            {Object.keys(matrixData).length > 0 && headers.length > 0 && (
-                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                                    {Object.keys(matrixData).map((primaryKey) => (
-                                        <div key={primaryKey} className="bg-white p-4 rounded-lg shadow-md border border-green-200 flex flex-col">
-                                            {/* Display the value of the main identifier column as the card title */}
-                                            <h3 className="text-lg font-bold text-green-800 mb-2">
-                                                {mainIdentifierHeader && matrixData[primaryKey][mainIdentifierHeader] ? matrixData[primaryKey][mainIdentifierHeader] : primaryKey}
-                                                {primaryKey === 'Total' && <span className="text-gray-500 normal-case ml-2">(Total)</span>}
-                                            </h3>
-                                            <div className="flex flex-col gap-2">
-                                                {/* Display other attributes, excluding the main identifier column */}
-                                                {headers.filter(header => header !== mainIdentifierHeader).map((columnHeader) => {
-                                                    const cellValue = matrixData[primaryKey][columnHeader];
-                                                    const originalColIndex = headers.indexOf(columnHeader);
-
-                                                    return (
-                                                        <div key={columnHeader} className="flex items-center justify-between text-sm text-gray-700">
-                                                            <span className="font-medium pr-2">{columnHeader}:</span>
-                                                            <div className="flex-grow">
+                                                        return (
+                                                            <td key={`${rowIndex}-${colIndex}`} className="px-4 py-2 whitespace-nowrap">
                                                                 {/* Conditional Input Rendering based on inferred type */}
                                                                 {columnTypes[originalColIndex] === 'binary' ? (
                                                                     <button
-                                                                        onClick={() => handleBinaryToggle(primaryKey, columnHeader)}
-                                                                        className={`w-full px-1 py-0.5 rounded-md text-sm font-medium ${
+                                                                        onClick={() => handleBinaryToggle(rowIndex, columnHeader)}
+                                                                        className={`w-full px-2 py-1 rounded-md text-sm font-medium ${
                                                                             (String(cellValue).toLowerCase() === 'ya' || String(cellValue).toLowerCase() === 'true' || String(cellValue).toLowerCase() === '1')
                                                                                 ? 'bg-green-500 text-white'
                                                                                 : 'bg-red-500 text-white'
@@ -811,44 +876,43 @@
                                                                     <input
                                                                         type="number"
                                                                         value={cellValue !== null && cellValue !== undefined ? cellValue : ''}
-                                                                        onChange={(e) => handleCellChange(primaryKey, columnHeader, parseFloat(e.target.value))}
-                                                                        className="w-full border border-green-300 rounded-md px-1 py-0.5 text-sm text-gray-900 focus:ring-green-500 focus:border-green-500"
+                                                                        onChange={(e) => handleCellChange(rowIndex, columnHeader, parseFloat(e.target.value))}
+                                                                        className="w-full border border-gray-300 rounded-md px-2 py-1 text-sm text-gray-900 focus:ring-green-500 focus:border-green-500"
                                                                     />
                                                                 ) : ( // Default to text
                                                                     <input
                                                                         type="text"
                                                                         value={cellValue !== null && cellValue !== undefined ? cellValue : ''}
-                                                                        onChange={(e) => handleCellChange(primaryKey, columnHeader, e.target.value)}
-                                                                        className="w-full border border-green-300 rounded-md px-1 py-0.5 text-sm text-gray-900 focus:ring-green-500 focus:border-green-500"
+                                                                        onChange={(e) => handleCellChange(rowIndex, columnHeader, e.target.value)}
+                                                                        className="w-full border border-gray-300 rounded-md px-2 py-1 text-sm text-gray-900 focus:ring-green-500 focus:border-green-500"
                                                                     />
                                                                 )}
-                                                            </div>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        </div>
-                                    ))}
+                                                            </td>
+                                                        );
+                                                    })}
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
                                 </div>
+                            ) : (
+                                <p className="text-center text-gray-500 mt-8">Unggah file Excel untuk melihat data.</p>
                             )}
                         </div>
                     </main>
 
-                    {/* Footer Section */}
-                    <footer className="bg-green-800 text-white p-4 mt-8">
-                        <div className="container mx-auto text-center text-sm">
-                            <p>&copy; {new Date().getFullYear()} Spreadsheet Alam. Hak Cipta Dilindungi.</p>
-                            <p>Dibuat dengan sentuhan alam dan AI.</p>
-                        </div>
+                    {/* Footer Section - Minimalist */}
+                    <footer className="p-4 text-center text-gray-600 text-sm mt-8">
+                        <p>&copy; {new Date().getFullYear()} Spreadsheet Alam. Hak Cipta Dilindungi.</p>
                     </footer>
 
                     {/* AI Prompt Modal */}
                     {showAIPromptModal && (
-                        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center p-4 z-50">
-                            <div className="bg-green-100 p-6 rounded-xl shadow-lg w-full max-w-md border border-green-300">
-                                <h2 className="text-2xl font-bold text-green-800 mb-4">Hasilkan Konten dengan AI</h2>
+                        <div className="fixed inset-0 bg-gray-900 bg-opacity-70 flex items-center justify-center p-4 z-50">
+                            <div className="bg-white p-6 rounded-xl shadow-lg w-full max-w-md border border-gray-200">
+                                <h2 className="text-2xl font-semibold text-gray-800 mb-4">Hasilkan Konten dengan AI</h2>
                                 <textarea
-                                    className="w-full p-3 border border-green-300 rounded-lg mb-4 focus:ring-green-500 focus:border-green-500 text-gray-800"
+                                    className="w-full p-3 border border-gray-300 rounded-lg mb-4 focus:ring-green-500 focus:border-green-500 text-gray-800"
                                     rows="4"
                                     placeholder="Masukkan prompt Anda di sini (misalnya: 'Daftar 5 ide produk baru untuk startup teknologi')"
                                     value={aiPrompt}
@@ -858,14 +922,14 @@
                                 <div className="flex justify-end gap-3">
                                     <button
                                         onClick={() => setShowAIPromptModal(false)}
-                                        className="px-5 py-2 bg-gray-300 text-gray-800 font-semibold rounded-lg hover:bg-gray-400 transition duration-300"
+                                        className="px-5 py-2 bg-gray-300 text-gray-800 font-semibold rounded-full hover:bg-gray-400 transition duration-300"
                                         disabled={isGeneratingAI}
                                     >
                                         Batal
                                     </button>
                                     <button
                                         onClick={handleGenerateAIContent}
-                                        className="px-5 py-2 bg-green-700 text-white font-semibold rounded-lg shadow-md hover:bg-green-800 transition duration-300"
+                                        className="px-5 py-2 bg-green-600 text-white font-semibold rounded-full shadow-md hover:bg-green-700 transition duration-300"
                                         disabled={isGeneratingAI}
                                     >
                                         {isGeneratingAI ? (
@@ -884,14 +948,14 @@
 
                     {/* Voice Input Modal */}
                     {showVoiceInputModal && (
-                        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center p-4 z-50">
-                            <div className="bg-green-100 p-6 rounded-xl shadow-lg w-full max-w-md border border-green-300 text-center">
-                                <h2 className="text-2xl font-bold text-green-800 mb-4">Input Suara</h2>
-                                <p className="text-green-700 text-lg mb-4">{voiceStatus}</p>
+                        <div className="fixed inset-0 bg-gray-900 bg-opacity-70 flex items-center justify-center p-4 z-50">
+                            <div className="bg-white p-6 rounded-xl shadow-lg w-full max-w-md border border-gray-200 text-center">
+                                <h2 className="text-2xl font-semibold text-gray-800 mb-4">Input Suara</h2>
+                                <p className="text-gray-700 text-lg mb-4">{voiceStatus}</p>
                                 <p className="text-sm text-gray-600 mb-4">
                                     Untuk memperbarui data, ucapkan perintah seperti:
                                     <br/>
-                                    "Untuk baris **'[Judul Kartu]'** di kolom **'[Nama Kolom]'**, atur nilai menjadi **'[Nilai Baru]'**".
+                                    "Untuk baris **'[Nilai Kolom Pertama]'** di kolom **'[Nama Kolom]'**, atur nilai menjadi **'[Nilai Baru]'**".
                                     <br/>
                                     Contoh: "Untuk baris 'Amphibia' di kolom 'jum', atur nilai menjadi 10"
                                 </p>
@@ -909,14 +973,14 @@
                                             setVoiceStatus('Siap');
                                             setIsGeneratingAI(false); // Ensure loading is reset
                                         }}
-                                        className="px-5 py-2 bg-red-600 text-white font-semibold rounded-lg shadow-md hover:bg-red-700 transition duration-300"
+                                        className="px-5 py-2 bg-red-500 text-white font-semibold rounded-full shadow-md hover:bg-red-600 transition duration-300"
                                     >
                                         Tutup
                                     </button>
                                     {!isGeneratingAI && voiceStatus !== 'Mendengarkan...' && ( // Only show start if not already listening or processing
                                         <button
                                             onClick={startVoiceInput}
-                                            className="px-5 py-2 bg-green-700 text-white font-semibold rounded-lg shadow-md hover:bg-green-800 transition duration-300"
+                                            className="px-5 py-2 bg-green-600 text-white font-semibold rounded-full shadow-md hover:bg-green-700 transition duration-300"
                                         >
                                             Mulai Mendengarkan
                                         </button>
